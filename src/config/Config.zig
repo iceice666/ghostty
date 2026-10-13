@@ -2312,6 +2312,23 @@ keybind: Keybinds = .{},
 ///   * `end` - Insert the new tab at the end of the tab list.
 @"window-new-tab-position": WindowNewTabPosition = .current,
 
+/// The position of the window tab bar. Valid values:
+///
+///   * `top` (default) - Keep the platform's existing horizontal tab bar.
+///     On GTK, `gtk-tabs-location` still controls its top or bottom placement.
+///
+///   * `left` - Display tabs vertically on the left side of the terminal.
+///
+///   * `right` - Display tabs vertically on the right side of the terminal.
+///
+/// Supported on macOS and GTK. Changing this setting updates existing windows.
+/// On macOS, windows created with side tabs and `macos-titlebar-style = tabs`
+/// use a native titlebar. Reopen those windows after switching back to `top`
+/// to restore the integrated titlebar style. Existing hidden-titlebar windows
+/// with multiple tabs retain their sidebar when switching to `top` until only
+/// one tab remains, since a hidden titlebar cannot show native tab controls.
+@"window-tab-bar-position": WindowTabBarPosition = .top,
+
 /// Whether to show the tab bar.
 ///
 /// Valid values:
@@ -2332,7 +2349,7 @@ keybind: Keybinds = .{},
 ///    Never show the tab bar. Tabs are only accessible via the tab
 ///    overview or by keybind actions.
 ///
-/// Currently only supported on Linux (GTK).
+/// Supported on Linux (GTK) and for the vertical tab bar on macOS.
 @"window-show-tab-bar": WindowShowTabBar = .auto,
 
 /// Background color for the window titlebar. This only takes effect if
@@ -9503,6 +9520,13 @@ pub const MacOSDockDropBehavior = enum {
     @"new-window",
 };
 
+/// See window-tab-bar-position
+pub const WindowTabBarPosition = enum {
+    top,
+    left,
+    right,
+};
+
 /// See window-show-tab-bar
 pub const WindowShowTabBar = enum {
     always,
@@ -11240,6 +11264,34 @@ test "clipboard write limit" {
         std.math.maxInt(usize),
         cfg.@"clipboard-write-limit-bytes".value,
     );
+}
+
+test "window-tab-bar-position" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expectEqual(WindowTabBarPosition.top, cfg.@"window-tab-bar-position");
+
+    inline for (.{ "left", "right", "top" }) |position| {
+        var it: TestIterator = .{ .data = &.{
+            "--window-tab-bar-position=" ++ position,
+        } };
+        try cfg.loadIter(alloc, &it);
+        try testing.expectEqual(
+            std.meta.stringToEnum(WindowTabBarPosition, position).?,
+            cfg.@"window-tab-bar-position",
+        );
+        try testing.expect(cfg._diagnostics.empty());
+    }
+
+    var invalid: TestIterator = .{ .data = &.{
+        "--window-tab-bar-position=bottom",
+    } };
+    try cfg.loadIter(alloc, &invalid);
+    try testing.expect(!cfg._diagnostics.empty());
+    try testing.expectEqual(WindowTabBarPosition.top, cfg.@"window-tab-bar-position");
 }
 
 test "compatibility: scrollback-limit renamed to bytes" {

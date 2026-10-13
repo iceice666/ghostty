@@ -278,6 +278,10 @@ pub const Window = extern struct {
         /// setup by `setup-menu`.
         context_menu_page: ?*adw.TabPage = null,
 
+        /// Suppress selection feedback while projecting the TabView into rows.
+        syncing_sidebar: bool = false,
+        disposing: bool = false,
+
         /// The manually overridden title.
         title_override: ?[:0]const u8 = null,
 
@@ -287,6 +291,9 @@ pub const Window = extern struct {
         tab_view: *adw.TabView,
         toolbar: *adw.ToolbarView,
         toast_overlay: *adw.ToastOverlay,
+        tab_content: *gtk.Box,
+        tab_sidebar: *gtk.Box,
+        sidebar_tabs: *gtk.ListBox,
 
         pub var offset: c_int = 0;
     };
@@ -721,10 +728,123 @@ pub const Window = extern struct {
             .bottom => priv.toolbar.addBottomBar(priv.tab_bar.as(gtk.Widget)),
         }
 
+        // Sidebars are a projection of the same TabView, not a second tab model.
+        priv.tab_content.reorderChildAfter(
+            priv.tab_sidebar.as(gtk.Widget),
+            if (config.@"window-tab-bar-position" == .right)
+                priv.toast_overlay.as(gtk.Widget)
+            else
+                null,
+        );
+        self.syncSidebarVisibility();
+
         // Do our window-protocol specific appearance sync.
         priv.winproto.syncAppearance() catch |err| {
             log.warn("failed to sync winproto appearance error={}", .{err});
         };
+    }
+
+    fn syncSidebarVisibility(self: *Self) void {
+        const priv = self.private();
+        if (priv.disposing) return;
+        const config = if (priv.config) |v| v.get() else return;
+        const visible = config.@"window-tab-bar-position" != .top and
+            switch (config.@"window-show-tab-bar") {
+                .always => true,
+                .auto => priv.tab_view.getNPages() > 1,
+                .never => false,
+            };
+        priv.tab_sidebar.as(gtk.Widget).setVisible(@intFromBool(visible));
+    }
+
+    /// Rebuild only when the page collection changes. Title and tooltip bindings
+    /// follow the page directly and are released with their target widgets.
+    fn syncSidebarTabs(self: *Self) void {
+        const priv = self.private();
+        if (priv.disposing) return;
+        priv.syncing_sidebar = true;
+        defer priv.syncing_sidebar = false;
+        while (priv.sidebar_tabs.as(gtk.Widget).getFirstChild()) |child| {
+            priv.sidebar_tabs.remove(child);
+        }
+
+        const count = priv.tab_view.getNPages();
+        var i: c_int = 0;
+        while (i < count) : (i += 1) {
+            const page = priv.tab_view.getNthPage(i);
+            const row = gtk.ListBoxRow.new();
+            row.as(gtk.Widget).setFocusable(@intFromBool(false));
+            const box = gtk.Box.new(.horizontal, 6);
+            const label = gtk.Label.new(null);
+            label.setXalign(0);
+            label.setEllipsize(.end);
+            label.setMaxWidthChars(24);
+            label.as(gtk.Widget).setHexpand(@intFromBool(true));
+            _ = page.as(gobject.Object).bindProperty(
+                "title",
+                label.as(gobject.Object),
+                "label",
+                .{ .sync_create = true },
+            );
+            _ = page.as(gobject.Object).bindProperty(
+                "tooltip",
+                row.as(gobject.Object),
+                "tooltip-markup",
+                .{ .sync_create = true },
+            );
+            box.append(label.as(gtk.Widget));
+
+            const close = gtk.Button.newFromIconName("window-close-symbolic");
+            close.as(gtk.Widget).addCssClass("flat");
+            close.as(gtk.Widget).setTooltipText(i18n._("Close Tab"));
+            close.as(gtk.Widget).setFocusable(@intFromBool(false));
+            _ = gtk.Button.signals.clicked.connect(close, *Self, sidebarCloseTab, self, .{});
+            box.append(close.as(gtk.Widget));
+            row.setChild(box.as(gtk.Widget));
+            priv.sidebar_tabs.append(row.as(gtk.Widget));
+        }
+        self.syncSidebarSelection();
+        self.syncSidebarVisibility();
+    }
+
+    fn syncSidebarSelection(self: *Self) void {
+        const priv = self.private();
+        if (priv.disposing) return;
+        const was_syncing = priv.syncing_sidebar;
+        priv.syncing_sidebar = true;
+        defer priv.syncing_sidebar = was_syncing;
+        const page = priv.tab_view.getSelectedPage() orelse {
+            priv.sidebar_tabs.unselectAll();
+            return;
+        };
+        priv.sidebar_tabs.selectRow(priv.sidebar_tabs.getRowAtIndex(
+            priv.tab_view.getPagePosition(page),
+        ));
+    }
+
+    fn sidebarTabSelected(_: *gtk.ListBox, row_: ?*gtk.ListBoxRow, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        if (priv.syncing_sidebar or priv.disposing) return;
+        const row = row_ orelse return;
+        const view = priv.tab_view;
+        const index = row.getIndex();
+        if (index < 0 or index >= view.getNPages()) return;
+        const page = view.getNthPage(index);
+        if (view.getSelectedPage() != page) view.setSelectedPage(page);
+        if (self.getActiveSurface()) |surface| surface.grabFocus();
+    }
+
+    fn sidebarCloseTab(button: *gtk.Button, self: *Self) callconv(.c) void {
+        const row = ext.getAncestor(gtk.ListBoxRow, button.as(gtk.Widget)) orelse return;
+        const view = self.private().tab_view;
+        const index = row.getIndex();
+        if (index < 0 or index >= view.getNPages()) return;
+        // Use the existing close-page handler, including confirmation dialogs.
+        view.closePage(view.getNthPage(index));
+    }
+
+    fn sidebarPageReordered(_: *adw.TabView, _: *adw.TabPage, _: c_int, self: *Self) callconv(.c) void {
+        self.syncSidebarTabs();
     }
 
     /// Sync the state of any actions on this window.
@@ -1087,7 +1207,7 @@ pub const Window = extern struct {
 
         return switch (config.@"gtk-titlebar-style") {
             // If the titlebar style is tabs never show the titlebar.
-            .tabs => false,
+            .tabs => config.@"window-tab-bar-position" != .top,
 
             // If the titlebar style is native show the titlebar if configured
             // to do so.
@@ -1120,6 +1240,9 @@ pub const Window = extern struct {
     fn getTabsVisible(self: *Self) bool {
         const priv = self.private();
         const config = if (priv.config) |v| v.get() else return true;
+
+        // In side mode the sidebar replaces the horizontal tab strip.
+        if (config.@"window-tab-bar-position" != .top) return false;
 
         switch (config.@"gtk-titlebar-style") {
             .tabs => {
@@ -1417,6 +1540,8 @@ pub const Window = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+        // TabView may emit page/selection signals as the template is torn down.
+        priv.disposing = true;
 
         if (priv.handle_active_state_source) |v| {
             if (glib.Source.remove(v) == 0) {
@@ -1696,6 +1821,8 @@ pub const Window = extern struct {
     ) callconv(.c) void {
         const priv = self.private();
 
+        self.syncSidebarSelection();
+
         // Always reset our binding source in case we have no pages.
         priv.tab_bindings.setSource(null);
 
@@ -1719,6 +1846,8 @@ pub const Window = extern struct {
         _: c_int,
         self: *Self,
     ) callconv(.c) void {
+        self.syncSidebarTabs();
+
         // Get the attached page which must be a Tab object.
         const child = page.getChild();
         const tab = gobject.ext.cast(Tab, child) orelse return;
@@ -1773,6 +1902,8 @@ pub const Window = extern struct {
         _: c_int,
         self: *Self,
     ) callconv(.c) void {
+        self.syncSidebarTabs();
+
         // We need to get the tab to disconnect the signals.
         const child = page.getChild();
         const tab = gobject.ext.cast(Tab, child) orelse return;
@@ -1837,6 +1968,7 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const priv = self.private();
+        self.syncSidebarVisibility();
         if (priv.tab_view.getNPages() == 0) {
             // If we have no pages left then we want to close window.
 
@@ -2351,6 +2483,11 @@ pub const Window = extern struct {
             class.bindTemplateChildPrivate("tab_view", .{});
             class.bindTemplateChildPrivate("toolbar", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
+            class.bindTemplateChildPrivate("tab_content", .{});
+            class.bindTemplateChildPrivate("tab_sidebar", .{});
+            class.bindTemplateChildPrivate("sidebar_tabs", .{});
+            class.bindTemplateCallback("sidebar_tab_selected", &sidebarTabSelected);
+            class.bindTemplateCallback("sidebar_page_reordered", &sidebarPageReordered);
 
             // Template Callbacks
             class.bindTemplateCallback("realize", &windowRealize);

@@ -60,8 +60,10 @@ class HiddenTitlebarTerminalWindow: TerminalWindow {
         standardWindowButton(.miniaturizeButton)?.isHidden = true
         standardWindowButton(.zoomButton)?.isHidden = true
 
-        // Disallow tabbing if the titlebar is hidden, since that will (should) also hide the tab bar.
-        tabbingMode = .disallowed
+        // Horizontal tabs need a titlebar, but sidebar tabs do not. This method
+        // runs again on title updates and fullscreen exit, so preserve side mode.
+        let position = (NSApp.delegate as? AppDelegate)?.ghostty.config.windowTabBarPosition ?? .top
+        tabbingMode = position == .top ? .disallowed : .automatic
 
         // Nuke it from orbit -- hide the titlebar container entirely, just in case. There are
         // some operations that appear to bring back the titlebar visibility so this ensures

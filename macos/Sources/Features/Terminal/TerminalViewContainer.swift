@@ -5,6 +5,9 @@ import SwiftUI
 /// Modifying `NSThemeFrame` can sometimes be unpredictable.
 class TerminalViewContainer: NSView {
     private let terminalView: NSView
+    private var contentConstraints: [NSLayoutConstraint] = []
+    private var tabSidebar: NSView?
+    private var tabSidebarPosition: Ghostty.Config.WindowTabBarPosition = .top
 
     /// Background color applied with glass effect
     private(set) var glassEffectView: NSView?
@@ -47,20 +50,61 @@ class TerminalViewContainer: NSView {
         // Fall back to initialContentSize in that case.
         if let initialContentSize,
            hostingSize.width < initialContentSize.width || hostingSize.height < initialContentSize.height {
-            return initialContentSize
+            return NSSize(width: initialContentSize.width + sidebarWidth, height: initialContentSize.height)
         }
-        return hostingSize
+        return NSSize(width: hostingSize.width + sidebarWidth, height: hostingSize.height)
     }
 
     private func setup() {
         addSubview(terminalView)
         terminalView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
+        updateContentConstraints()
+    }
+
+    private var sidebarWidth: CGFloat { tabSidebar == nil ? 0 : 200 }
+
+    func setTabSidebar(_ sidebar: NSView?, position: Ghostty.Config.WindowTabBarPosition) {
+        guard sidebar !== tabSidebar || position != tabSidebarPosition else { return }
+        NSLayoutConstraint.deactivate(contentConstraints)
+        tabSidebar?.removeFromSuperview()
+        tabSidebar = sidebar
+        tabSidebarPosition = position
+        if let sidebar { addSubview(sidebar) }
+        updateContentConstraints()
+        invalidateIntrinsicContentSize()
+    }
+
+    private func updateContentConstraints() {
+        contentConstraints = [
             terminalView.topAnchor.constraint(equalTo: topAnchor),
-            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
             terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
+        ]
+        if let sidebar = tabSidebar {
+            contentConstraints += [
+                sidebar.topAnchor.constraint(equalTo: topAnchor),
+                sidebar.bottomAnchor.constraint(equalTo: bottomAnchor),
+                sidebar.widthAnchor.constraint(equalToConstant: sidebarWidth),
+            ]
+            if tabSidebarPosition == .left {
+                contentConstraints += [
+                    sidebar.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    terminalView.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+                    terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                ]
+            } else {
+                contentConstraints += [
+                    terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    terminalView.trailingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+                    sidebar.trailingAnchor.constraint(equalTo: trailingAnchor),
+                ]
+            }
+        } else {
+            contentConstraints += [
+                terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ]
+        }
+        NSLayoutConstraint.activate(contentConstraints)
     }
 
     override func viewDidMoveToWindow() {

@@ -90,6 +90,24 @@ struct ConfigTests {
 
     // MARK: - Enum Properties
 
+    @Test func windowTabBarPositionDefaultsToTop() throws {
+        let config = try TemporaryConfig("")
+        #expect(config.windowTabBarPosition == .top)
+        #expect(config.windowShowTabBar == "auto")
+    }
+
+    @Test(arguments: ["top", "left", "right"])
+    func windowTabBarPositionValues(raw: String) throws {
+        let config = try TemporaryConfig("window-tab-bar-position = \(raw)")
+        #expect(config.windowTabBarPosition.rawValue == raw)
+    }
+
+    @Test(arguments: ["auto", "always", "never"])
+    func windowShowTabBarValues(raw: String) throws {
+        let config = try TemporaryConfig("window-show-tab-bar = \(raw)")
+        #expect(config.windowShowTabBar == raw)
+    }
+
     @Test func macosTitlebarStyleDefaultsToTransparent() throws {
         let config = try TemporaryConfig("")
         #expect(config.macosTitlebarStyle == .transparent)

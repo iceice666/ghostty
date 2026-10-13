@@ -157,17 +157,62 @@ template $GhosttyWindow: Adw.ApplicationWindow {
           visible: bind template.debug;
         }
 
-        Adw.ToastOverlay toast_overlay {
-          Adw.TabView tab_view {
-            notify::n-pages => $notify_n_pages();
-            notify::selected-page => $notify_selected_page();
-            close-page => $close_page();
-            page-attached => $page_attached();
-            page-detached => $page_detached();
-            create-window => $tab_create_window();
-            setup-menu => $setup_tab_menu();
-            menu-model: tab_context_menu;
-            shortcuts: none;
+        Gtk.Box tab_content {
+          orientation: horizontal;
+          vexpand: true;
+
+          Gtk.Box tab_sidebar {
+            orientation: vertical;
+            width-request: 200;
+            visible: false;
+
+            styles [
+              "sidebar",
+            ]
+
+            Gtk.ScrolledWindow {
+              hscrollbar-policy: never;
+              vexpand: true;
+
+              Gtk.ListBox sidebar_tabs {
+                selection-mode: single;
+                activate-on-single-click: true;
+                row-selected => $sidebar_tab_selected();
+
+                styles [
+                  "navigation-sidebar",
+                ]
+              }
+            }
+
+            Gtk.Button {
+              icon-name: "tab-new-symbolic";
+              tooltip-text: _("New Tab");
+              action-name: "win.new-tab";
+              can-focus: false;
+              focus-on-click: false;
+
+              styles [
+                "flat",
+              ]
+            }
+          }
+
+          Adw.ToastOverlay toast_overlay {
+            hexpand: true;
+
+            Adw.TabView tab_view {
+              page-reordered => $sidebar_page_reordered();
+              notify::n-pages => $notify_n_pages();
+              notify::selected-page => $notify_selected_page();
+              close-page => $close_page();
+              page-attached => $page_attached();
+              page-detached => $page_detached();
+              create-window => $tab_create_window();
+              setup-menu => $setup_tab_menu();
+              menu-model: tab_context_menu;
+              shortcuts: none;
+            }
           }
         }
       }

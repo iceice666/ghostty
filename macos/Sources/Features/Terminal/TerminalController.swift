@@ -18,6 +18,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return defaultValue
         }
 
+        // Sidebar tabs do not need the titlebar-tab layout hacks. Keep the
+        // native titlebar when creating a window in this mode.
+        if config.windowTabBarPosition != .top && config.macosTitlebarStyle == .tabs {
+            return defaultValue
+        }
+
         let nib = switch config.macosTitlebarStyle {
         case .native: "Terminal"
         case .hidden: "TerminalHiddenTitlebar"
@@ -45,6 +51,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// This is the hash value of the last tabGroup.windows array. We use this to detect order
     /// changes in the list.
     private var tabWindowsHash: Int = 0
+
+    private var tabSidebar: TerminalTabSidebar?
 
     /// The initial window presentation is deferred by one runloop turn in a few places so
     /// AppKit can settle tab/window state first. Close actions must cancel it to avoid
@@ -564,6 +572,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // Update our derived config
             self.derivedConfig = DerivedConfig(config)
             syncRestoration(config)
+            tabSidebar?.configure(config)
+            if let window = window as? HiddenTitlebarTerminalWindow {
+                window.tabbingMode = config.windowTabBarPosition == .top ? .disallowed : .automatic
+            }
 
             // If we have no surfaces in our window (is that possible?) then we update
             // our window appearance based on the root config. If we have surfaces, we
@@ -1124,6 +1136,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         container.initialContentSize = focusedSurface?.initialSize
 
         window.contentView = container
+        let sidebar = TerminalTabSidebar(controller: self)
+        tabSidebar = sidebar
+        sidebar.configure(config)
+        if window is HiddenTitlebarTerminalWindow, config.windowTabBarPosition != .top {
+            window.tabbingMode = .automatic
+        }
 
         // If we have a default size, we want to apply it.
         if let defaultSize {
@@ -1231,6 +1249,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         super.windowWillClose(notification)
+        // Drop KVO tokens before AppKit detaches the window from its tab group.
+        tabSidebar = nil
         cancelPendingInitialPresentation()
         self.relabelTabs()
 
@@ -1267,6 +1287,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
         self.relabelTabs()
+        tabSidebar?.refresh()
         self.fixTabBar()
     }
 

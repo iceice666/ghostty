@@ -46,6 +46,31 @@ class MockConfig: Ghostty.Config {
 }
 
 struct TerminalViewContainerTests {
+    @Test @MainActor func sidebarLayoutAndRemoval() {
+        let container = TerminalViewContainer { EmptyView() }
+        container.frame = NSRect(x: 0, y: 0, width: 800, height: 500)
+        container.initialContentSize = NSSize(width: 640, height: 480)
+        let sidebar = NSView()
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+
+        container.setTabSidebar(sidebar, position: .left)
+        container.layoutSubtreeIfNeeded()
+        #expect(sidebar.superview === container)
+        #expect(sidebar.frame.width == 200)
+        #expect(sidebar.frame.minX == 0)
+        #expect(container.intrinsicContentSize.width == 840)
+
+        container.setTabSidebar(sidebar, position: .right)
+        container.layoutSubtreeIfNeeded()
+        #expect(sidebar.frame.minX == 600)
+        #expect(sidebar.frame.height == 500)
+
+        container.setTabSidebar(nil, position: .top)
+        container.layoutSubtreeIfNeeded()
+        #expect(sidebar.superview == nil)
+        #expect(container.intrinsicContentSize.width == 640)
+    }
+
     @Test func glassAvailability() async throws {
         let view = await MockTerminalViewContainer {
             EmptyView()

@@ -234,6 +234,30 @@ extension Ghostty {
             return ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) ? v : nil
         }
 
+        enum WindowTabBarPosition: String {
+            case top
+            case left
+            case right
+        }
+
+        var windowTabBarPosition: WindowTabBarPosition {
+            guard let config = self.config else { return .top }
+            var value: UnsafePointer<Int8>?
+            let key = "window-tab-bar-position"
+            guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)),
+                  let value else { return .top }
+            return WindowTabBarPosition(rawValue: String(cString: value)) ?? .top
+        }
+
+        var windowShowTabBar: String {
+            guard let config = self.config else { return "auto" }
+            var value: UnsafePointer<Int8>?
+            let key = "window-show-tab-bar"
+            guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)),
+                  let value else { return "auto" }
+            return String(cString: value)
+        }
+
         var windowNewTabPosition: String {
             guard let config = self.config else { return "" }
             var v: UnsafePointer<Int8>?
