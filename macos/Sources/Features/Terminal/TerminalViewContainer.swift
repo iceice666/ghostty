@@ -8,6 +8,8 @@ class TerminalViewContainer: NSView {
     private var contentConstraints: [NSLayoutConstraint] = []
     private var tabSidebar: NSView?
     private var tabSidebarPosition: Ghostty.Config.WindowTabBarPosition = .top
+    private var tabSidebarWidth: CGFloat = TabSidebarLayout.defaultWidth
+    private var tabSidebarWidthConstraint: NSLayoutConstraint?
 
     /// Background color applied with glass effect
     private(set) var glassEffectView: NSView?
@@ -61,10 +63,18 @@ class TerminalViewContainer: NSView {
         updateContentConstraints()
     }
 
-    private var sidebarWidth: CGFloat { tabSidebar == nil ? 0 : 200 }
+    private var sidebarWidth: CGFloat { tabSidebar == nil ? 0 : tabSidebarWidth }
 
-    func setTabSidebar(_ sidebar: NSView?, position: Ghostty.Config.WindowTabBarPosition) {
-        guard sidebar !== tabSidebar || position != tabSidebarPosition else { return }
+    func setTabSidebar(
+        _ sidebar: NSView?,
+        position: Ghostty.Config.WindowTabBarPosition,
+        width: CGFloat = TabSidebarLayout.defaultWidth
+    ) {
+        guard sidebar !== tabSidebar || position != tabSidebarPosition else {
+            setTabSidebarWidth(width)
+            return
+        }
+        tabSidebarWidth = width
         NSLayoutConstraint.deactivate(contentConstraints)
         tabSidebar?.removeFromSuperview()
         tabSidebar = sidebar
@@ -74,16 +84,27 @@ class TerminalViewContainer: NSView {
         invalidateIntrinsicContentSize()
     }
 
+    /// Resize the sidebar in place. The terminal absorbs the change, so the
+    /// window keeps its size (as with a split divider).
+    func setTabSidebarWidth(_ width: CGFloat) {
+        guard width != tabSidebarWidth else { return }
+        tabSidebarWidth = width
+        tabSidebarWidthConstraint?.constant = sidebarWidth
+    }
+
     private func updateContentConstraints() {
+        tabSidebarWidthConstraint = nil
         contentConstraints = [
             terminalView.topAnchor.constraint(equalTo: topAnchor),
             terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ]
         if let sidebar = tabSidebar {
+            let width = sidebar.widthAnchor.constraint(equalToConstant: sidebarWidth)
+            tabSidebarWidthConstraint = width
             contentConstraints += [
                 sidebar.topAnchor.constraint(equalTo: topAnchor),
                 sidebar.bottomAnchor.constraint(equalTo: bottomAnchor),
-                sidebar.widthAnchor.constraint(equalToConstant: sidebarWidth),
+                width,
             ]
             if tabSidebarPosition == .left {
                 contentConstraints += [
