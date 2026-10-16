@@ -604,20 +604,8 @@ extension Ghostty {
                 // Check if the user clicked "OK"
                 guard response == .alertFirstButtonReturn  else { return }
 
-                // Get the input text
                 let newTitle = textField.stringValue
-                if newTitle.isEmpty {
-                    // Empty means that user wants the title to be set automatically
-                    // We also need to reload the config for the "title" property to be
-                    // used again by this tab.
-                    let prevTitle = titleFromTerminal ?? "👻"
-                    titleFromTerminal = nil
-                    setTitle(prevTitle)
-                } else {
-                    // Set the title and prevent it from being changed automatically
-                    titleFromTerminal = title
-                    title = newTitle
-                }
+                setTitleOverride(newTitle.isEmpty ? nil : newTitle)
             }
 
             // We prefer to run our alert in a sheet modal if we have a window.
@@ -628,6 +616,20 @@ extension Ghostty {
                 // visible. The above codepath should be taken most times but I'm just
                 // noting this as something I noticed consistently.
                 completionHandler(alert.runModal())
+            }
+        }
+
+        /// Set a user title that terminal title changes cannot replace, or
+        /// restore the terminal-provided title with nil.
+        func setTitleOverride(_ newTitle: String?) {
+            if let newTitle {
+                // Keep tracking the terminal title while the override is active.
+                if titleFromTerminal == nil { titleFromTerminal = title }
+                title = newTitle
+            } else {
+                let prevTitle = titleFromTerminal ?? "👻"
+                titleFromTerminal = nil
+                setTitle(prevTitle)
             }
         }
 
