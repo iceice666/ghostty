@@ -1613,6 +1613,8 @@ extension Ghostty {
             title: String,
             body: String,
             requireFocus: Bool = true) {
+            // Badge the tab sidebar even if system notifications are not authorized.
+            surfaceView.markUnreadNotification()
             let center = UNUserNotificationCenter.current()
             center.requestAuthorization(options: [.alert, .sound]) { _, error in
                 if let error = error {

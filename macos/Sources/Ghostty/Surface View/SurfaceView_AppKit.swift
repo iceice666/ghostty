@@ -109,6 +109,15 @@ extension Ghostty {
         /// True when the bell is active. This is set inactive on focus or event.
         @Published private(set) var bell: Bool = false
 
+        /// True when a desktop notification arrived while this surface was not
+        /// focused. Cleared on focus. Independent of notification permissions.
+        @Published private(set) var unreadNotification: Bool = false
+
+        func markUnreadNotification() {
+            guard !(focused && window?.isKeyWindow == true) else { return }
+            unreadNotification = true
+        }
+
         /// A clipboard confirmation waiting to be handled by its controller.
         @Published var pendingClipboardConfirmation: ClipboardConfirmationRequest? {
             didSet {
@@ -468,6 +477,7 @@ extension Ghostty {
 
                 // We unset our bell state if we gained focus
                 bell = false
+                unreadNotification = false
 
                 // Remove any notifications for this surface once we gain focus.
                 if !notificationIdentifiers.isEmpty {
