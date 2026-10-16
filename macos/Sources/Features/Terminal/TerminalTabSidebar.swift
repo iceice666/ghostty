@@ -13,7 +13,6 @@ final class TerminalTabSidebar {
     private var position: Ghostty.Config.WindowTabBarPosition = .top
     private var visibility = "auto"
     private var hiddenFallbackPosition: Ghostty.Config.WindowTabBarPosition?
-    private var restoreNativeBar = false
     private let stack = TabSidebarStackView()
     let view = NSVisualEffectView()
 
@@ -48,10 +47,7 @@ final class TerminalTabSidebar {
     }
 
     func configure(_ config: Ghostty.Config) {
-        // Restoration cannot depend on which member happened to hide the shared
-        // native bar: that member may have been closed before this reload.
         if position != .top && config.windowTabBarPosition == .top {
-            restoreNativeBar = true
             if controller?.window is HiddenTitlebarTerminalWindow,
                (controller?.window?.tabGroup?.windows.count ?? 0) > 1 {
                 hiddenFallbackPosition = position
@@ -100,17 +96,18 @@ final class TerminalTabSidebar {
         }
         guard needsSidebar else {
             container.setTabSidebar(nil, position: .top)
-            if restoreNativeBar, let group = window.tabGroup,
-               !group.isTabBarVisible, group.windows.count > 1 {
-                window.toggleTabBar(nil)
-            }
-            restoreNativeBar = false
+            (window as? TerminalWindow)?.hidesNativeTabBar = false
             windowObservation = nil
             groupObservations.removeAll()
             titleObservations.removeAll()
             observedGroup = nil
             return
         }
+
+        // Hide the native bar for this window instead of calling toggleTabBar.
+        // toggleTabBar flips state shared by the whole tab group, so multiple
+        // controllers refreshing for the same tab change can show it again.
+        (window as? TerminalWindow)?.hidesNativeTabBar = true
 
         let group = window.tabGroup
         if observedGroup !== group {
@@ -124,17 +121,9 @@ final class TerminalTabSidebar {
                     group.observe(\.selectedWindow, options: [.new]) { [weak self] _, _ in
                         self?.scheduleRefresh()
                     },
-                    group.observe(\.isTabBarVisible, options: [.new]) { [weak self] _, _ in
-                        self?.scheduleRefresh()
-                    },
                 ]
             }
         }
-        if group?.isTabBarVisible == true {
-            restoreNativeBar = true
-            window.toggleTabBar(nil)
-        }
-
         let windows = group?.windows ?? [window]
         let fallback = position == .top
         let show = fallback || visibility == "always" || (visibility != "never" && windows.count > 1)

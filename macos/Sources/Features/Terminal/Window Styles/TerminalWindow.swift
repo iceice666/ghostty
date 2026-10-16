@@ -219,6 +219,7 @@ class TerminalWindow: NSWindow {
         } else {
             tabBarDidDisappear()
         }
+        syncNativeTabBarVisibility()
         viewModel.isMainWindow = true
     }
 
@@ -260,6 +261,7 @@ class TerminalWindow: NSWindow {
         // it. This has been verified to work on macOS 12 to 26
         if isTabBar(childViewController) {
             childViewController.identifier = Self.tabBarIdentifier
+            childViewController.isHidden = hidesNativeTabBar
             tabBarDidAppear()
         }
     }
@@ -277,6 +279,21 @@ class TerminalWindow: NSWindow {
     /// This identifier is attached to the tab bar view controller when we detect it being
     /// added.
     static let tabBarIdentifier: NSUserInterfaceItemIdentifier = .init("_ghosttyTabBar")
+
+    /// When sidebar tabs present this window's tab group, keep the native tab
+    /// bar accessory collapsed. This does not change AppKit's tab-bar setting.
+    var hidesNativeTabBar = false {
+        didSet {
+            guard oldValue != hidesNativeTabBar else { return }
+            syncNativeTabBarVisibility()
+        }
+    }
+
+    private func syncNativeTabBarVisibility() {
+        for childViewController in titlebarAccessoryViewControllers where isTabBar(childViewController) {
+            childViewController.isHidden = hidesNativeTabBar
+        }
+    }
 
     func isTabBar(_ childViewController: NSTitlebarAccessoryViewController) -> Bool {
         if childViewController.identifier == nil {
