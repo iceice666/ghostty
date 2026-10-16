@@ -141,6 +141,8 @@ final class TerminalTabSidebar: NSObject {
     /// The structure currently loaded into the outline view.
     private var loadedStructure: Structure?
     private var tabs: [TabNode] = []
+    /// The trailing "New Tab" row, like the one in Arc and Zen.
+    private let newTabItem = NewTabNode()
     private var syncingSelection = false
     private var dragInProgress = false
     private weak var draggedWindow: NSWindow?
@@ -152,9 +154,10 @@ final class TerminalTabSidebar: NSObject {
     private var resizeStartWidth: CGFloat = 0
 
     let view = NSVisualEffectView()
+    private let scroll = NSScrollView()
     private let outline = TabSidebarOutlineView()
+    private let contextMenu = NSMenu()
     private let footer = NSStackView()
-    private let newTabButton = TabSidebarActionButton()
     private let collapseButton = TabSidebarActionButton()
     private let resizeHandle = TabSidebarResizeHandle()
     private var handleConstraints: [NSLayoutConstraint] = []
@@ -192,7 +195,6 @@ final class TerminalTabSidebar: NSObject {
     // MARK: Setup
 
     private func setupOutline() {
-        let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -218,6 +220,15 @@ final class TerminalTabSidebar: NSObject {
         outline.delegate = self
         outline.target = self
         outline.action = #selector(rowClicked(_:))
+        outline.onMouseDown = { [weak self] event, row in
+            self?.mouseDown(event, row: row) ?? false
+        }
+        outline.onMiddleClick = { [weak self] row in
+            self?.middleClicked(row: row)
+        }
+        contextMenu.delegate = self
+        contextMenu.autoenablesItems = false
+        outline.menu = contextMenu
         outline.registerForDraggedTypes([Self.dragType])
         outline.setDraggingSourceOperationMask(.move, forLocal: true)
         // Not `.gap`: gap feedback hides the dragged row while leaving its split
@@ -242,31 +253,17 @@ final class TerminalTabSidebar: NSObject {
         footer.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 8, right: 8)
         footer.spacing = 4
 
-        newTabButton.title = "New Tab"
-        newTabButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
-        newTabButton.imagePosition = .imageLeading
-        newTabButton.imageHugsTitle = true
-        newTabButton.isBordered = false
-        newTabButton.font = .systemFont(ofSize: 13)
-        newTabButton.alignment = .left
-        newTabButton.contentTintColor = .secondaryLabelColor
-        newTabButton.toolTip = "New Tab"
-        newTabButton.setAccessibilityLabel("New Tab")
-        newTabButton.handler = { [weak self] in self?.controller?.newTab(nil) }
-
         collapseButton.isBordered = false
         collapseButton.imagePosition = .imageOnly
         collapseButton.contentTintColor = .secondaryLabelColor
         collapseButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         collapseButton.handler = { TabSidebarLayout.update(collapsed: !TabSidebarLayout.collapsed) }
 
-        footer.addArrangedSubview(newTabButton)
         footer.addArrangedSubview(collapseButton)
         NSLayoutConstraint.activate([
             footer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            newTabButton.heightAnchor.constraint(equalToConstant: 28),
             collapseButton.widthAnchor.constraint(equalToConstant: 28),
             collapseButton.heightAnchor.constraint(equalToConstant: 28),
         ])
@@ -280,8 +277,6 @@ final class TerminalTabSidebar: NSObject {
         footerKey = key
         footer.orientation = collapsed ? .vertical : .horizontal
         footer.alignment = collapsed ? .centerX : .centerY
-        newTabButton.imagePosition = collapsed ? .imageOnly : .imageLeading
-        newTabButton.setContentHuggingPriority(collapsed ? .required : .defaultLow, for: .horizontal)
         let symbol = (hiddenFallbackPosition ?? position) == .right ? "sidebar.right" : "sidebar.left"
         let label = collapsed ? "Expand Sidebar" : "Collapse Sidebar"
         collapseButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
@@ -650,6 +645,7 @@ final class TerminalTabSidebar: NSObject {
                 switch action {
                 case .close: self.closeTab(tab)
                 case .collapse, .expand: tab.controller?.sidebarSplitsExpanded.toggle()
+                case .none: break
                 }
             }
         } else if let split = item as? SplitNode, let surface = split.surface {
@@ -670,14 +666,91 @@ final class TerminalTabSidebar: NSObject {
                 guard let self, let split else { return }
                 self.closeSplit(split)
             }
+        } else if item is NewTabNode {
+            cell.apply(.init(
+                title: "New Tab",
+                symbol: "plus",
+                indent: 10,
+                compact: compact,
+                emphasized: false,
+                status: .none,
+                hint: nil,
+                action: .none,
+                actionLabel: "",
+                identifier: "sidebar-new-tab",
+                accessibilityLabel: "New Tab",
+                muted: true))
+            cell.onAction = nil
         }
     }
 
     // MARK: Actions
 
+    /// Like Arc and Zen, rows activate on mouse-down. Returns true when the
+    /// event was fully handled and the outline must not track it.
+    private func mouseDown(_ event: NSEvent, row: Int) -> Bool {
+        // Control-click opens the context menu through the default path.
+        guard row >= 0, !event.modifierFlags.contains(.control),
+              let item = outline.item(atRow: row) else { return false }
+        if event.clickCount >= 2 {
+            guard item is TabNode || item is SplitNode else { return false }
+            rename(item as AnyObject)
+            return true
+        }
+
+        let targetWindow: NSWindow?
+        if let tab = item as? TabNode {
+            activate(tab)
+            targetWindow = tab.window
+        } else if let split = item as? SplitNode {
+            selectSplit(split)
+            targetWindow = split.tab?.window
+        } else {
+            // The New Tab row acts on mouse-up, like a button.
+            return false
+        }
+
+        // Each tab is its own window with its own sidebar, and activating
+        // another tab orders this window out. Continue the press in the now
+        // visible sidebar so dragging a background tab still reorders it.
+        if let targetWindow, targetWindow !== controller?.window,
+           let other = (targetWindow.windowController as? TerminalController)?.tabSidebar,
+           other !== self, other.view.window === targetWindow {
+            other.continueMouseDown(event, scrollOrigin: scroll.contentView.bounds.origin)
+            return true
+        }
+        syncingSelection = true
+        outline.selectRowIndexes([row], byExtendingSelection: false)
+        syncingSelection = false
+        return false
+    }
+
+    private func continueMouseDown(_ event: NSEvent, scrollOrigin: NSPoint) {
+        // Tab windows share a frame; match this sidebar's rows to the one the
+        // press started in so the same row is under the pointer.
+        refresh()
+        view.layoutSubtreeIfNeeded()
+        scroll.contentView.scroll(to: scrollOrigin)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        outline.mouseDown(with: event)
+    }
+
+    private func middleClicked(row: Int) {
+        guard row >= 0, let item = outline.item(atRow: row) else { return }
+        if let tab = item as? TabNode {
+            closeTab(tab)
+        } else if let split = item as? SplitNode {
+            closeSplit(split)
+        }
+    }
+
     @objc private func rowClicked(_ sender: Any?) {
         let row = outline.clickedRow
         guard row >= 0, let item = outline.item(atRow: row) else { return }
+        if item is NewTabNode {
+            controller?.newTab(nil)
+            return
+        }
         if let tab = item as? TabNode {
             activate(tab)
         } else if let split = item as? SplitNode {
@@ -723,10 +796,103 @@ final class TerminalTabSidebar: NSObject {
     }
 
     private func closeTab(_ tab: TabNode) {
-        guard let target = tab.controller else { return }
-        // Select before confirming so the sheet is presented on the visible tab.
-        activate(tab)
+        guard let target = tab.controller, let window = tab.window else { return }
+        // Like browsers, closing a background tab keeps the current tab, unless
+        // a confirmation sheet must be presented on the closing tab.
+        let background = window !== selectedWindow && (window.tabGroup?.windows.count ?? 0) > 1
+        if !background || target.surfaceTree.contains(where: { $0.needsConfirmQuit }) {
+            activate(tab)
+        }
         target.closeTab(nil)
+    }
+
+    /// Close-other and close-below actions are relative to, and confirm on, the target tab.
+    private func closeOthers(_ tab: TabNode, below: Bool) {
+        guard let target = tab.controller else { return }
+        activate(tab)
+        if below {
+            target.closeTabsOnTheRight(nil)
+        } else {
+            target.closeOtherTabs(nil)
+        }
+    }
+
+    private func moveToNewWindow(_ tab: TabNode) {
+        guard let window = tab.window, (window.tabGroup?.windows.count ?? 0) > 1 else { return }
+        window.tabGroup?.selectedWindow = window
+        window.moveTabToNewWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: Rename
+
+    /// Rename a tab or split in place, from the sidebar of its own (visible) tab.
+    private func rename(_ item: AnyObject) {
+        let window: NSWindow?
+        let surface: Ghostty.SurfaceView?
+        if let tab = item as? TabNode {
+            window = tab.window
+            surface = nil
+        } else if let split = item as? SplitNode {
+            window = split.tab?.window
+            surface = split.surface
+        } else {
+            return
+        }
+        guard let window, let target = window.windowController as? TerminalController else { return }
+        if window !== selectedWindow || !window.isKeyWindow {
+            window.tabGroup?.selectedWindow = window
+            window.makeKeyAndOrderFront(nil)
+        }
+        guard let sidebar = target.tabSidebar, sidebar.view.window === window else {
+            Self.promptRename(target, surface: surface)
+            return
+        }
+        sidebar.refresh()
+        sidebar.view.layoutSubtreeIfNeeded()
+        sidebar.beginInlineRename(window: window, surface: surface)
+    }
+
+    private func beginInlineRename(window: NSWindow, surface: Ghostty.SurfaceView?) {
+        guard let target = window.windowController as? TerminalController,
+              let tab = tabs.first(where: { $0.window === window }) else { return }
+        let item: AnyObject = surface.flatMap { surface in
+            tab.splits.first { $0.surface === surface }
+        } ?? tab
+        let row = outline.row(forItem: item)
+        // The rail has no title to edit.
+        guard !TabSidebarLayout.collapsed, row >= 0 else {
+            Self.promptRename(target, surface: surface)
+            return
+        }
+        outline.scrollRowToVisible(row)
+        guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? TabSidebarCellView else {
+            Self.promptRename(target, surface: surface)
+            return
+        }
+        let current = surface?.title ?? target.titleOverride ?? window.title
+        cell.beginEditing(current) { [weak target, weak surface] value in
+            guard let target else { return }
+            if let value {
+                let title = value.isEmpty ? nil : value
+                if let surface {
+                    surface.setTitleOverride(title)
+                } else {
+                    target.titleOverride = title
+                }
+            }
+            if let focused = target.focusedSurface {
+                target.window?.makeFirstResponder(focused)
+            }
+        }
+    }
+
+    private static func promptRename(_ target: TerminalController, surface: Ghostty.SurfaceView?) {
+        if let surface {
+            surface.promptTitle()
+        } else {
+            target.promptTabTitle()
+        }
     }
 
     /// Reorder through the native tab group so the native model stays the
@@ -762,13 +928,13 @@ final class TerminalTabSidebar: NSObject {
 
 extension TerminalTabSidebar: NSOutlineViewDataSource, NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let tab = item as? TabNode else { return item == nil ? tabs.count : 0 }
+        guard let tab = item as? TabNode else { return item == nil ? tabs.count + 1 : 0 }
         return TabSidebarLayout.collapsed ? 0 : tab.splits.count
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if let tab = item as? TabNode { return tab.splits[index] }
-        return tabs[index]
+        return index < tabs.count ? tabs[index] : newTabItem
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -778,7 +944,7 @@ extension TerminalTabSidebar: NSOutlineViewDataSource, NSOutlineViewDelegate {
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         if TabSidebarLayout.collapsed { return 40 }
-        return item is TabNode ? 34 : 28
+        return item is SplitNode ? 28 : 34
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
@@ -953,7 +1119,10 @@ extension TerminalTabSidebar: NSOutlineViewDataSource, NSOutlineViewDelegate {
         guard let source = draggedIndex(info) else { return [] }
         let destination: Int
         if item == nil, index >= 0 {
-            destination = index
+            // The New Tab row always stays last.
+            destination = min(index, tabs.count)
+        } else if item is NewTabNode {
+            destination = tabs.count
         } else if let tab = item as? TabNode, let tabIndex = tabs.firstIndex(where: { $0 === tab }) {
             // Dropping onto a tab or among its splits places the tab next to it.
             destination = index >= 0 || source < tabIndex ? tabIndex + 1 : tabIndex
@@ -991,7 +1160,87 @@ extension TerminalTabSidebar: NSOutlineViewDataSource, NSOutlineViewDelegate {
     }
 }
 
+// MARK: - Context menu
+
+extension TerminalTabSidebar: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = outline.clickedRow
+        guard row >= 0, let item = outline.item(atRow: row) else { return }
+        let add: (String, Bool, @escaping () -> Void) -> Void = { title, enabled, handler in
+            let menuItem = TabSidebarMenuItem(title: title, handler: handler)
+            menuItem.isEnabled = enabled
+            menu.addItem(menuItem)
+        }
+
+        if let tab = item as? TabNode, let index = tabs.firstIndex(where: { $0 === tab }) {
+            let count = tabs.count
+            add("Rename Tab…", true) { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.rename(tab)
+            }
+            if !tab.splits.isEmpty, !TabSidebarLayout.collapsed {
+                let expanded = tab.controller?.sidebarSplitsExpanded ?? true
+                add(expanded ? "Collapse Splits" : "Expand Splits", true) { [weak tab] in
+                    tab?.controller?.sidebarSplitsExpanded.toggle()
+                }
+            }
+            menu.addItem(.separator())
+            add("Move Tab to New Window", count > 1) { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.moveToNewWindow(tab)
+            }
+            menu.addItem(.separator())
+            add("Close Tab", true) { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.closeTab(tab)
+            }
+            add("Close Other Tabs", count > 1) { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.closeOthers(tab, below: false)
+            }
+            add("Close Tabs Below", index < count - 1) { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.closeOthers(tab, below: true)
+            }
+        } else if let split = item as? SplitNode {
+            add("Rename Split…", true) { [weak self, weak split] in
+                guard let self, let split else { return }
+                self.rename(split)
+            }
+            menu.addItem(.separator())
+            add("Close Split", true) { [weak self, weak split] in
+                guard let self, let split else { return }
+                self.closeSplit(split)
+            }
+        } else if item is NewTabNode {
+            add("New Tab", true) { [weak self] in self?.controller?.newTab(nil) }
+        }
+    }
+}
+
+private final class TabSidebarMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(invoke(_:)), keyEquivalent: "")
+        target = self
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func invoke(_ sender: Any?) {
+        handler()
+    }
+}
+
 // MARK: - Nodes
+
+private final class NewTabNode {}
 
 private final class TabNode {
     weak var window: NSWindow?
@@ -1023,6 +1272,34 @@ private final class SplitNode {
 /// Hides the disclosure triangle (splits use their own chevron button) and
 /// gives every level the full row width; cells indent themselves.
 private final class TabSidebarOutlineView: NSOutlineView {
+    /// Called before the outline tracks a left mouse-down; return true to
+    /// consume the event.
+    var onMouseDown: ((NSEvent, Int) -> Bool)?
+    var onMiddleClick: ((Int) -> Void)?
+    private var middleClickRow = -1
+
+    private func row(for event: NSEvent) -> Int {
+        row(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if onMouseDown?(event, row(for: event)) == true { return }
+        super.mouseDown(with: event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        guard event.buttonNumber == 2 else { return super.otherMouseDown(with: event) }
+        middleClickRow = row(for: event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2 else { return super.otherMouseUp(with: event) }
+        let row = row(for: event)
+        let pressed = middleClickRow
+        middleClickRow = -1
+        if row >= 0, row == pressed { onMiddleClick?(row) }
+    }
+
     override func frameOfOutlineCell(atRow row: Int) -> NSRect { .zero }
 
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
@@ -1032,8 +1309,8 @@ private final class TabSidebarOutlineView: NSOutlineView {
     }
 }
 
-private final class TabSidebarCellView: NSTableCellView {
-    enum Action { case close, expand, collapse }
+private final class TabSidebarCellView: NSTableCellView, NSTextFieldDelegate {
+    enum Action { case none, close, expand, collapse }
 
     struct Content {
         var title: String
@@ -1047,9 +1324,18 @@ private final class TabSidebarCellView: NSTableCellView {
         var actionLabel: String
         var identifier: String
         var accessibilityLabel: String
+        var muted = false
     }
 
     var onAction: (() -> Void)?
+    /// Whether the row is hovered or selected. Close buttons, like in Arc and
+    /// Zen, are only shown then; they stay in the layout and accessible.
+    var rowActive = false {
+        didSet { if oldValue != rowActive { updateActionVisibility() } }
+    }
+    private var revealsActionOnHover = false
+    private let editor = NSTextField(string: "")
+    private var editCompletion: ((String?) -> Void)?
 
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
@@ -1079,8 +1365,19 @@ private final class TabSidebarCellView: NSTableCellView {
         actionButton.contentTintColor = .secondaryLabelColor
         actionButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
         actionButton.handler = { [weak self] in self?.onAction?() }
+        editor.isBordered = false
+        editor.isBezeled = false
+        editor.drawsBackground = true
+        editor.backgroundColor = .textBackgroundColor
+        editor.focusRingType = .exterior
+        editor.usesSingleLineMode = true
+        editor.lineBreakMode = .byClipping
+        editor.cell?.isScrollable = true
+        editor.delegate = self
+        editor.isHidden = true
+        editor.setAccessibilityLabel("Title")
 
-        for view in [icon, label, status, hintLabel, actionButton] as [NSView] {
+        for view in [icon, label, status, hintLabel, actionButton, editor] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -1091,6 +1388,9 @@ private final class TabSidebarCellView: NSTableCellView {
             actionButton.widthAnchor.constraint(equalToConstant: 22),
             actionButton.heightAnchor.constraint(equalToConstant: 22),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            editor.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -2),
+            editor.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            editor.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         iconLeading = icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10)
         expandedConstraints = [
@@ -1141,7 +1441,8 @@ private final class TabSidebarCellView: NSTableCellView {
         label.stringValue = content.title
         label.font = .systemFont(ofSize: content.indent > 10 ? 12 : 13,
                                  weight: content.emphasized ? .medium : .regular)
-        label.isHidden = content.compact
+        label.textColor = content.muted ? .secondaryLabelColor : .labelColor
+        label.isHidden = content.compact || editCompletion != nil
         label.setAccessibilityIdentifier(content.identifier)
         hintLabel.stringValue = content.hint ?? ""
         hintLabel.isHidden = content.hint == nil
@@ -1151,6 +1452,7 @@ private final class TabSidebarCellView: NSTableCellView {
 
         let symbol: String
         switch content.action {
+        case .none: symbol = ""
         case .close: symbol = "xmark"
         case .expand: symbol = "chevron.right"
         case .collapse: symbol = "chevron.down"
@@ -1158,11 +1460,101 @@ private final class TabSidebarCellView: NSTableCellView {
         actionButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: content.actionLabel)
         actionButton.toolTip = content.actionLabel.components(separatedBy: ":").first
         actionButton.setAccessibilityLabel(content.actionLabel)
-        actionButton.isHidden = content.compact || content.hint != nil
+        actionButton.isHidden = content.compact || content.hint != nil || content.action == .none
+        revealsActionOnHover = content.action == .close
+        updateActionVisibility()
+        // Faded-out buttons drop out of the accessibility tree; keep the
+        // action reachable from the row itself.
+        if content.action == .none || content.compact {
+            setAccessibilityCustomActions(nil)
+        } else {
+            let name = content.actionLabel.components(separatedBy: ":").first ?? content.actionLabel
+            setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: name) { [weak self] in
+                    self?.onAction?()
+                    return true
+                },
+            ])
+        }
+        if editCompletion != nil {
+            status.isHidden = true
+            actionButton.isHidden = true
+            hintLabel.isHidden = true
+        }
 
         toolTip = content.title
         setAccessibilityLabel([content.accessibilityLabel, content.status.accessibilityDescription]
             .compactMap { $0 }.joined(separator: ", "))
+    }
+
+    private func updateActionVisibility() {
+        actionButton.alphaValue = !revealsActionOnHover || rowActive || editCompletion != nil ? 1 : 0
+    }
+
+    // MARK: Inline editing
+
+    /// Edit the title in place. The completion receives the new title, or nil
+    /// when editing was cancelled with Escape. Losing focus commits, like Arc.
+    func beginEditing(_ text: String, completion: @escaping (String?) -> Void) {
+        guard let window, isCompact != true else {
+            completion(nil)
+            return
+        }
+        if editCompletion != nil { finishEditing(commit: false) }
+        editCompletion = completion
+        editor.stringValue = text
+        editor.font = label.font
+        editor.isHidden = false
+        label.isHidden = true
+        status.isHidden = true
+        actionButton.isHidden = true
+        hintLabel.isHidden = true
+        guard window.makeFirstResponder(editor) else {
+            finishEditing(commit: false)
+            return
+        }
+        editor.currentEditor()?.selectAll(nil)
+    }
+
+    private func finishEditing(commit: Bool) {
+        guard let completion = editCompletion else { return }
+        editCompletion = nil
+        let value = editor.stringValue
+        editor.isHidden = true
+        label.isHidden = isCompact == true
+        status.isHidden = status.status == .none
+        actionButton.isHidden = isCompact == true || !hintLabel.stringValue.isEmpty
+        hintLabel.isHidden = hintLabel.stringValue.isEmpty
+        if commit { label.stringValue = value.isEmpty ? label.stringValue : value }
+        completion(commit ? value : nil)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.cancelOperation(_:)):
+            finishEditing(commit: false)
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            finishEditing(commit: true)
+            return true
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        finishEditing(commit: true)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        // A reload or a closing tab removes the cell; drop the edit.
+        if newWindow == nil { finishEditing(commit: false) }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        finishEditing(commit: false)
     }
 }
 
@@ -1267,7 +1659,26 @@ private final class TabSidebarStatusView: NSView {
 private final class TabSidebarRowView: NSTableRowView {
     private var tracking: NSTrackingArea?
     private var isHovered = false {
-        didSet { if oldValue != isHovered { needsDisplay = true } }
+        didSet {
+            guard oldValue != isHovered else { return }
+            needsDisplay = true
+            updateCellActivity()
+        }
+    }
+
+    override var isSelected: Bool {
+        didSet { updateCellActivity() }
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        updateCellActivity()
+    }
+
+    private func updateCellActivity() {
+        for case let cell as TabSidebarCellView in subviews {
+            cell.rowActive = isHovered || isSelected
+        }
     }
 
     private var shape: NSBezierPath {
@@ -1330,6 +1741,12 @@ private class TabSidebarActionButton: NSButton {
 
     @objc private func invoke(_ sender: Any?) {
         handler?()
+    }
+
+    /// A faded-out button (see `TabSidebarCellView.rowActive`) lets clicks
+    /// through to the row, e.g. the first click into an inactive window.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        alphaValue > 0 ? super.hitTest(point) : nil
     }
 
     override func updateTrackingAreas() {

@@ -104,20 +104,82 @@ final class GhosttyTabSidebarTests: GhosttyCustomConfigCase {
         XCTAssertTrue(title(app, "sidebar-split-2").waitForExistence(timeout: 5))
         app.typeKey("t", modifierFlags: .command)
         XCTAssertTrue(title(app, "sidebar-tab-2").waitForExistence(timeout: 5))
-        // The new tab is selected; drag the first tab below it.
+        // The new tab is selected; drag the first (background) tab below it.
         let first = row(app, "sidebar-tab-1")
         let second = row(app, "sidebar-tab-2")
         let start = first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         start.press(forDuration: 0.3, thenDragTo: second.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)))
-        // The selected tab (previously second) is now first and still selected.
-        expectSelected(row(app, "sidebar-tab-1"))
-        // Two tabs plus two split rows, nothing hidden or duplicated.
+        // Pressing a background tab activates it (like Arc), and the drag
+        // continues in its sidebar: it is now second with its focused split.
+        expectSelected(row(app, "sidebar-split-2"))
+        // Two tabs, two split rows and New Tab, nothing hidden or duplicated.
         let rows = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in app.outlineRows.count == 4 }, object: nil
+            predicate: NSPredicate { _, _ in app.outlineRows.count == 5 }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [rows], timeout: 5), .completed)
         XCTAssertEqual(app.staticTexts.matching(identifier: "sidebar-split-1").count, 1)
         XCTAssertEqual(app.staticTexts.matching(identifier: "sidebar-split-2").count, 1)
+        XCTAssertGreaterThan(title(app, "sidebar-split-1").frame.minY, title(app, "sidebar-tab-2").frame.minY)
+    }
+
+    @MainActor
+    func testNewTabRowAndInlineRename() throws {
+        try updateConfig(
+            """
+            window-tab-bar-position = left
+            window-show-tab-bar = always
+            """
+        )
+        let app = try ghosttyApplication()
+        app.launch()
+        let newTab = title(app, "sidebar-new-tab")
+        XCTAssertTrue(newTab.waitForExistence(timeout: 5))
+        newTab.click()
+        XCTAssertTrue(title(app, "sidebar-tab-2").waitForExistence(timeout: 5))
+        expectSelected(row(app, "sidebar-tab-2"))
+
+        // Double-clicking a background tab selects it and edits its title in place.
+        // (The title label is hidden while the editor is shown.)
+        title(app, "sidebar-tab-1").doubleClick()
+        let field = app.textFields["Title"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Renamed\n")
+        let renamed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == 'Renamed'"), object: title(app, "sidebar-tab-1")
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [renamed], timeout: 5), .completed)
+        expectGone(field)
+        expectSelected(row(app, "sidebar-tab-1"))
+    }
+
+    @MainActor
+    func testCloseBackgroundTabKeepsSelection() throws {
+        try updateConfig(
+            """
+            window-tab-bar-position = left
+            window-show-tab-bar = always
+            confirm-close-surface = false
+            """
+        )
+        let app = try ghosttyApplication()
+        app.launch()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 5))
+        app.typeKey("t", modifierFlags: .command)
+        XCTAssertTrue(title(app, "sidebar-tab-2").waitForExistence(timeout: 5))
+        app.typeKey("t", modifierFlags: .command)
+        XCTAssertTrue(title(app, "sidebar-tab-3").waitForExistence(timeout: 5))
+
+        // The close button appears on hover and closes without switching tabs.
+        title(app, "sidebar-tab-1").hover()
+        row(app, "sidebar-tab-1").buttons.matching(NSPredicate(format: "label BEGINSWITH 'Close tab:'")).firstMatch.click()
+        expectGone(title(app, "sidebar-tab-3"))
+        expectSelected(row(app, "sidebar-tab-2"))
+
+        // The context menu offers browser-style bulk actions.
+        title(app, "sidebar-tab-2").rightClick()
+        app.menuItems["Close Other Tabs"].click()
+        expectGone(title(app, "sidebar-tab-2"))
+        expectSelected(row(app, "sidebar-tab-1"))
     }
 
     @MainActor
@@ -133,17 +195,22 @@ final class GhosttyTabSidebarTests: GhosttyCustomConfigCase {
 
         // Release the first tab (with splits) over the terminal area; this must
         // work even when the window fills the screen.
-        let outside = window.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
-        row(app, "sidebar-tab-1").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.3, thenDragTo: outside)
+        // Aim at the middle of the terminal area: restored windows can be so
+        // narrow that a fixed fraction of the width lands in the sidebar.
+        // Resolve it before the press, which activates the pressed tab.
+        let first = row(app, "sidebar-tab-1")
+        let start = first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let target = (first.frame.maxX + window.frame.maxX) / 2
+        let outside = start.withOffset(CGVector(dx: target - first.frame.midX, dy: 0))
+        start.press(forDuration: 0.3, thenDragTo: outside)
         let twoWindows = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in app.windows.count == 2 }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [twoWindows], timeout: 5), .completed)
-        // With `auto`, the torn-off tab keeps its sidebar (tab + two split rows)
-        // and the remaining lone, unsplit tab hides its sidebar.
+        // With `auto`, the torn-off tab keeps its sidebar (tab, two split rows
+        // and New Tab) and the remaining lone, unsplit tab hides its sidebar.
         let rows = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in app.outlineRows.count == 3 }, object: nil
+            predicate: NSPredicate { _, _ in app.outlineRows.count == 4 }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [rows], timeout: 5), .completed)
     }

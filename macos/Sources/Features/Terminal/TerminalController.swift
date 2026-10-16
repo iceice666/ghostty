@@ -52,7 +52,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// changes in the list.
     private var tabWindowsHash: Int = 0
 
-    private var tabSidebar: TerminalTabSidebar?
+    private(set) var tabSidebar: TerminalTabSidebar?
     /// Shared by all sidebar presentations of this tab; not terminal layout state.
     @Published var sidebarSplitsExpanded = true
 
