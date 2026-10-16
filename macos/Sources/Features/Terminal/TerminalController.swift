@@ -53,6 +53,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var tabWindowsHash: Int = 0
 
     private var tabSidebar: TerminalTabSidebar?
+    /// Shared by all sidebar presentations of this tab; not terminal layout state.
+    @Published var sidebarSplitsExpanded = true
 
     /// The initial window presentation is deferred by one runloop turn in a few places so
     /// AppKit can settle tab/window state first. Close actions must cancel it to avoid
@@ -1533,6 +1535,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
+        // Refresh after SwiftUI has synchronized the focused surface, even if
+        // both panes have the same title (and window-title KVO does not fire).
+        tabSidebar?.scheduleRefresh()
 
         // We always cancel our event listener
         surfaceAppearanceCancellables.removeAll()

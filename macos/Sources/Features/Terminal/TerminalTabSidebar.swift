@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 /// A presentation of AppKit's native window tab group, not a separate tab model.
 /// Actions deliberately go through TerminalController so close confirmations,
@@ -9,6 +10,7 @@ final class TerminalTabSidebar {
     private var windowObservation: NSKeyValueObservation?
     private var groupObservations: [NSKeyValueObservation] = []
     private var titleObservations: [NSKeyValueObservation] = []
+    private var surfaceObservations: Set<AnyCancellable> = []
     private var refreshPending = false
     private var position: Ghostty.Config.WindowTabBarPosition = .top
     private var visibility = "auto"
@@ -65,6 +67,7 @@ final class TerminalTabSidebar {
         }
         refresh()
         if !needsSidebar {
+            surfaceObservations.removeAll()
             windowObservation = nil
             groupObservations.removeAll()
             titleObservations.removeAll()
@@ -78,7 +81,7 @@ final class TerminalTabSidebar {
         position != .top || hiddenFallbackPosition != nil
     }
 
-    private func scheduleRefresh() {
+    func scheduleRefresh() {
         guard !refreshPending else { return }
         refreshPending = true
         DispatchQueue.main.async { [weak self] in
@@ -95,6 +98,7 @@ final class TerminalTabSidebar {
             hiddenFallbackPosition = nil
         }
         guard needsSidebar else {
+            surfaceObservations.removeAll()
             container.setTabSidebar(nil, position: .top)
             (window as? TerminalWindow)?.hidesNativeTabBar = false
             windowObservation = nil
@@ -126,7 +130,30 @@ final class TerminalTabSidebar {
         }
         let windows = group?.windows ?? [window]
         let fallback = position == .top
-        let show = fallback || visibility == "always" || (visibility != "never" && windows.count > 1)
+        // Observe even while hidden: the first split can make an auto sidebar visible.
+        surfaceObservations.removeAll()
+        var hasSplits = false
+        for tabWindow in windows {
+            guard let target = tabWindow.windowController as? TerminalController else { continue }
+            target.$sidebarSplitsExpanded.dropFirst().sink { [weak self] _ in
+                self?.scheduleRefresh()
+            }.store(in: &surfaceObservations)
+            target.$surfaceTree.dropFirst().sink { [weak self] _ in
+                self?.scheduleRefresh()
+            }.store(in: &surfaceObservations)
+            let surfaces = Array(target.surfaceTree)
+            hasSplits = hasSplits || surfaces.count > 1
+            for surface in surfaces {
+                surface.$title.dropFirst().sink { [weak self] _ in
+                    self?.scheduleRefresh()
+                }.store(in: &surfaceObservations)
+                surface.$focusInstant.dropFirst().sink { [weak self] _ in
+                    self?.scheduleRefresh()
+                }.store(in: &surfaceObservations)
+            }
+        }
+        let show = fallback || visibility == "always" ||
+            (visibility != "never" && (windows.count > 1 || hasSplits))
         container.setTabSidebar(show ? view : nil, position: hiddenFallbackPosition ?? position)
         titleObservations = windows.map { tabWindow in
             tabWindow.observe(\.title, options: [.new]) { [weak self] _, _ in
@@ -156,12 +183,18 @@ final class TerminalTabSidebar {
             select.toolTip = tabWindow.title
             select.setAccessibilityLabel("Select tab: \(tabWindow.title)")
             select.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let close = TabSidebarActionButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")!,
-                                 target: self, action: #selector(closeTab(_:)))
+            let target = tabWindow.windowController as? TerminalController
+            let hasSplits = (target.map { Array($0.surfaceTree).count } ?? 0) > 1
+            let expanded = target?.sidebarSplitsExpanded ?? true
+            let actionTitle = hasSplits ? (expanded ? "Collapse splits" : "Expand splits") : "Close tab"
+            let symbol = hasSplits ? (expanded ? "chevron.down" : "chevron.right") : "xmark"
+            let close = TabSidebarActionButton(
+                image: NSImage(systemSymbolName: symbol, accessibilityDescription: actionTitle)!,
+                target: self, action: hasSplits ? #selector(toggleSplits(_:)) : #selector(closeTab(_:)))
             close.tag = index
             close.isBordered = false
-            close.toolTip = "Close Tab"
-            close.setAccessibilityLabel("Close tab: \(tabWindow.title)")
+            close.toolTip = actionTitle
+            close.setAccessibilityLabel("\(actionTitle): \(tabWindow.title)")
             close.contentTintColor = .secondaryLabelColor
             close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
             select.translatesAutoresizingMaskIntoConstraints = false
@@ -182,6 +215,14 @@ final class TerminalTabSidebar {
                 close.widthAnchor.constraint(equalToConstant: 24),
                 close.heightAnchor.constraint(equalToConstant: 24),
             ])
+            if let target = tabWindow.windowController as? TerminalController {
+                let surfaces = Array(target.surfaceTree)
+                if surfaces.count > 1 && target.sidebarSplitsExpanded {
+                    for (splitIndex, surface) in surfaces.enumerated() {
+                        addSplitRow(surface, index: splitIndex, controller: target, selectedTab: row.isSelected)
+                    }
+                }
+            }
         }
         let newTab = TabSidebarActionButton(title: "New Tab", target: self, action: #selector(addTab(_:)))
         newTab.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
@@ -199,6 +240,90 @@ final class TerminalTabSidebar {
             newTab.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -16),
             newTab.heightAnchor.constraint(equalToConstant: 32),
         ])
+    }
+
+    private func addSplitRow(
+        _ surface: Ghostty.SurfaceView,
+        index: Int,
+        controller: TerminalController,
+        selectedTab: Bool
+    ) {
+        let selected = selectedTab && controller.focusedSurface === surface
+        let row = TabSidebarRowView(isSelected: selected)
+        let title = surface.title.isEmpty ? "Split \(index + 1)" : surface.title
+        let select = TabSidebarSplitButton(title: title, target: self, action: #selector(selectSplit(_:)))
+        select.surface = surface
+        select.controller = controller
+        select.isBordered = false
+        select.font = .systemFont(ofSize: 12, weight: selected ? .medium : .regular)
+        select.contentTintColor = .labelColor
+        select.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: nil)
+        select.imagePosition = .imageLeading
+        select.imageHugsTitle = true
+        select.alignment = .left
+        select.lineBreakMode = .byTruncatingTail
+        select.toolTip = title
+        select.setAccessibilityLabel("Select split \(index + 1): \(title)")
+        select.setAccessibilityValue(selected ? "Selected" : "Not selected")
+        select.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        select.translatesAutoresizingMaskIntoConstraints = false
+        let close = TabSidebarSplitButton(
+            image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Split")!,
+            target: self, action: #selector(closeSplit(_:)))
+        close.surface = surface
+        close.controller = controller
+        close.isBordered = false
+        close.contentTintColor = .secondaryLabelColor
+        close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+        close.toolTip = "Close Split"
+        close.setAccessibilityLabel("Close split \(index + 1): \(title)")
+        close.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(select)
+        row.addSubview(close)
+        row.selectionButton = select
+        stack.addArrangedSubview(row)
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -16),
+            row.heightAnchor.constraint(equalToConstant: 32),
+            select.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 28),
+            select.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -4),
+            close.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -6),
+            close.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            close.widthAnchor.constraint(equalToConstant: 24),
+            close.heightAnchor.constraint(equalToConstant: 24),
+            select.topAnchor.constraint(equalTo: row.topAnchor),
+            select.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+        ])
+    }
+
+    @objc private func selectSplit(_ sender: TabSidebarSplitButton) {
+        guard let target = sender.controller, let surface = sender.surface,
+              target.surfaceTree.contains(surface), let window = target.window else { return }
+        window.tabGroup?.selectedWindow = window
+        window.makeKeyAndOrderFront(nil)
+        // A zoomed sibling is not attached to the window. Reveal the whole tree
+        // before using the normal focus path, which waits for view attachment.
+        if target.surfaceTree.zoomed != nil {
+            target.surfaceTree = SplitTree(root: target.surfaceTree.root, zoomed: nil)
+        }
+        target.focusSurface(surface)
+    }
+
+    @objc private func closeSplit(_ sender: TabSidebarSplitButton) {
+        guard let target = sender.controller, let surface = sender.surface,
+              target.surfaceTree.contains(surface), let handle = surface.surface,
+              let window = target.window else { return }
+        // Present any confirmation on the correct tab, without asynchronously
+        // scheduling focus on a surface that is about to be removed.
+        window.tabGroup?.selectedWindow = window
+        window.makeKeyAndOrderFront(nil)
+        target.ghostty.requestClose(surface: handle)
+    }
+
+    @objc private func toggleSplits(_ sender: NSButton) {
+        guard let window = targetWindow(for: sender),
+              let target = window.windowController as? TerminalController else { return }
+        target.sidebarSplitsExpanded.toggle()
     }
 
     private func targetWindow(for sender: NSButton) -> NSWindow? {
@@ -228,6 +353,12 @@ final class TerminalTabSidebar {
     @objc private func addTab(_ sender: NSButton) {
         controller?.newTab(sender)
     }
+}
+
+/// Stable, weak targets avoid focusing a different pane after a tree mutation.
+private final class TabSidebarSplitButton: TabSidebarActionButton {
+    weak var surface: Ghostty.SurfaceView?
+    weak var controller: TerminalController?
 }
 
 /// Full-width tab surfaces use semantic colors so light, dark, and increased
@@ -297,7 +428,7 @@ private final class TabSidebarRowView: NSView {
 }
 
 /// Keep close actions visible and keyboard-accessible, with their own hover target.
-private final class TabSidebarActionButton: NSButton {
+private class TabSidebarActionButton: NSButton {
     private var tracking: NSTrackingArea?
     private var isHovered = false
 
